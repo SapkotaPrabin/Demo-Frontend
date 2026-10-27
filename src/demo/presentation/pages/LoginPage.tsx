@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { notification } from "antd/lib";
+import { EyeInvisibleOutlined, EyeOutlined } from "@ant-design/icons";
 import { clearAccessToken, readAccessToken, saveAccessToken } from "../../business/auth";
 import { login } from "../../infrastructure/AuthApi";
 import merchFlowLogo from "../../../assets/images/logo-square.png";
@@ -11,6 +12,7 @@ export default function LoginPage() {
   const location = useLocation();
   const [contactNumber, setContactNumber] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -68,7 +70,12 @@ export default function LoginPage() {
           <input id="contact-number" type="tel" inputMode="tel" autoComplete="tel" placeholder="Enter your contact number" value={contactNumber} onChange={(event) => setContactNumber(event.target.value)} />
 
           <div className="demo-label-row"><label htmlFor="password">Password</label><a href="#help" onClick={(event) => event.preventDefault()}>Forgot password?</a></div>
-          <input id="password" type="password" autoComplete="current-password" placeholder="Enter your password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          <div className="demo-password-field">
+            <input id="password" type={showPassword ? "text" : "password"} autoComplete="current-password" placeholder="Enter your password" value={password} onChange={(event) => setPassword(event.target.value)} />
+            <button className="demo-password-toggle" type="button" aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword} onClick={() => setShowPassword((visible) => !visible)}>
+              {showPassword ? <EyeInvisibleOutlined /> : <EyeOutlined />}
+            </button>
+          </div>
 
           <button className="demo-primary-button" type="submit" disabled={loading}>{loading ? "Signing in…" : "Sign in"} <span aria-hidden="true">→</span></button>
         </form>
