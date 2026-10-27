@@ -6,6 +6,7 @@
   "scripts": {
     "build": "rsbuild build",
     "dev": "rsbuild",
+    "start": "rsbuild dev --open",
     "format": "prettier --write .",
     "lint": "eslint .",
     "preview": "rsbuild preview",

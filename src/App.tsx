@@ -1,12 +1,15 @@
-import './App.css';
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import LoginPage from "./demo/presentation/pages/LoginPage";
+import DashboardPage from "./demo/presentation/pages/DashboardPage";
 
-const App = () => {
+export default function App() {
   return (
-    <div className="content">
-      <h1>Rsbuild with React</h1>
-      <p>Start building amazing things with Rsbuild.</p>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<LoginPage />} />
+        <Route path="/demo/dashboard/*" element={<DashboardPage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
   );
-};
-
-export default App;
+}
