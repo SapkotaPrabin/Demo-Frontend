@@ -7,7 +7,8 @@ export type ApplicationStatus =
   | "NEEDS_INFO"
   | "APPROVED"
   | "REJECTED";
-export type RiskStatus = "PENDING" | "LOW" | "MEDIUM" | "HIGH";
+export type RiskStatus = "PENDING" | "LOW" | "MEDIUM" | "HIGH" | "PROHIBITED";
+export type RiskDecision = "PENDING" | "APPROVE" | "REJECT";
 export type ReviewDecision = "APPROVE" | "REJECT" | "REQUEST_INFO";
 
 export interface MerchantApplication {
@@ -22,6 +23,7 @@ export interface MerchantApplication {
   averageTransaction: number;
   status: ApplicationStatus;
   riskStatus: RiskStatus;
+  riskDecision: RiskDecision;
   createdAt: string;
   updatedAt: string;
   submittedAt: string | null;
@@ -58,6 +60,7 @@ const sample = (
   return {
     id: `MF-${String(profile.userId).padStart(3, "0")}-${String(offset).padStart(3, "0")}`,
     ...overrides,
+    riskDecision: "PENDING",
     createdAt,
     updatedAt: createdAt,
     submittedAt,
@@ -125,7 +128,7 @@ export function saveApplication(
   profile: UserProfile,
   role: DemoRole,
   applicationId: string | null,
-  values: Pick<MerchantApplication, "businessName" | "legalBusinessName" | "businessType" | "ownerName" | "contactNumber" | "contactEmail" | "requestedMonthlyVolume" | "averageTransaction"> & { submit: boolean },
+  values: Pick<MerchantApplication, "businessName" | "legalBusinessName" | "businessType" | "ownerName" | "contactNumber" | "contactEmail" | "requestedMonthlyVolume" | "averageTransaction"> & Partial<Pick<MerchantApplication, "status" | "riskStatus" | "createdByUserId" | "createdByName" | "assignedReviewerUserId" | "assignedReviewerName">> & { submit: boolean },
 ): MerchantApplication {
   const applications = ensureSeeded(profile, role);
   const { submit, ...fields } = values;
@@ -135,7 +138,7 @@ export function saveApplication(
     if (!target) throw new Error("Application not found.");
     if (role !== "admin" && (role !== "sales" || target.createdByUserId !== profile.userId)) throw new Error("You can only edit applications you created.");
     if (role === "sales" && !["DRAFT", "NEEDS_INFO"].includes(target.status)) throw new Error("This application is no longer editable.");
-    const updated = { ...target, ...fields, status: submit ? "SUBMITTED" as const : target.status, submittedAt: submit ? now : target.submittedAt, updatedAt: now };
+    const updated = { ...target, ...fields, status: fields.status ?? (submit ? "SUBMITTED" as const : target.status), submittedAt: submit ? now : target.submittedAt, updatedAt: now };
     writeApplications(applications.map((item) => item.id === applicationId ? updated : item));
     return updated;
   }
@@ -147,6 +150,7 @@ export function saveApplication(
     ...fields,
     status: submit ? "SUBMITTED" : "DRAFT",
     riskStatus: "PENDING",
+    riskDecision: "PENDING",
     createdAt: now,
     updatedAt: now,
     submittedAt: submit ? now : null,

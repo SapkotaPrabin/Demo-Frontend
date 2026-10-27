@@ -1,20 +1,29 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { roleLabels, type DemoRole, type UserProfile } from "../../business/auth";
+import { notification } from "antd/lib";
+import { createApplicationApi, listAllUsersByRoleApi, listApplicationsApi, recordRiskDecisionApi, updateApplicationApi, type ApiUser } from "../../infrastructure/AuthApi";
+import { readAccessToken } from "../../business/auth";
+import { type DemoRole, type UserProfile } from "../../business/auth";
+import { getContactNumberError, getEmailError } from "../../business/fieldValidation";
 import {
-  assignReviewer,
   demoWorkspaceUsers,
-  listApplications,
-  recordReviewDecision,
-  saveApplication,
   type ApplicationStatus,
   type MerchantApplication,
-  type ReviewDecision,
+  type RiskDecision,
 } from "../../business/merchantApplication";
 
-type FormValues = Pick<MerchantApplication, "businessName" | "legalBusinessName" | "businessType" | "ownerName" | "contactNumber" | "contactEmail" | "requestedMonthlyVolume" | "averageTransaction">;
+type FormValues = Pick<MerchantApplication, "businessName" | "legalBusinessName" | "businessType" | "contactNumber" | "contactEmail" | "requestedMonthlyVolume" | "averageTransaction"> & {
+  ownerFirstName: string;
+  ownerLastName: string;
+  applicationStatus: "DRAFT" | "SUBMITTED" | "UNDER_REVIEW" | "INFO_REQUIRED" | "APPROVED" | "DECLINED" | "WITHDRAWN";
+  riskStatus: MerchantApplication["riskStatus"];
+  salesUserId?: number;
+  assignedReviewerId?: number;
+};
 
-const emptyForm: FormValues = { businessName: "", legalBusinessName: "", businessType: "", ownerName: "", contactNumber: "", contactEmail: "", requestedMonthlyVolume: 0, averageTransaction: 0 };
+const emptyForm: FormValues = { businessName: "", legalBusinessName: "", businessType: "", ownerFirstName: "", ownerLastName: "", contactNumber: "", contactEmail: "", requestedMonthlyVolume: 0, averageTransaction: 0, applicationStatus: "SUBMITTED", riskStatus: "LOW" };
+const applicationStatuses: FormValues["applicationStatus"][] = ["DRAFT", "SUBMITTED", "UNDER_REVIEW", "INFO_REQUIRED", "APPROVED", "DECLINED", "WITHDRAWN"];
+const riskStatuses: Exclude<FormValues["riskStatus"], "PENDING">[] = ["LOW", "MEDIUM", "HIGH", "PROHIBITED"];
 const statusLabel: Record<ApplicationStatus, string> = { DRAFT: "Draft", SUBMITTED: "Submitted", IN_REVIEW: "In review", NEEDS_INFO: "Needs information", APPROVED: "Approved", REJECTED: "Rejected" };
 const businessTypes = ["Retail", "Food & beverage", "Professional services", "Health & fitness", "Health products", "Travel", "Other"];
 
@@ -22,98 +31,170 @@ function Status({ status }: { status: ApplicationStatus }) {
   return <span className={`mf-status mf-status-${status.toLowerCase()}`}>{statusLabel[status]}</span>;
 }
 
-function ApplicationForm({ initial, onCancel, onSave, saving }: { initial?: MerchantApplication; onCancel: () => void; onSave: (values: FormValues, submit: boolean) => void; saving: boolean }) {
+function ApplicationForm({ initial, role, salesUsers, reviewers, onCancel, onSave, saving }: { initial?: MerchantApplication; role: DemoRole; salesUsers: ApiUser[]; reviewers: ReturnType<typeof demoWorkspaceUsers>; onCancel: () => void; onSave: (values: FormValues) => void; saving: boolean }) {
   const [values, setValues] = useState<FormValues>(initial ? {
     businessName: initial.businessName,
     legalBusinessName: initial.legalBusinessName,
     businessType: initial.businessType,
-    ownerName: initial.ownerName,
+    ownerFirstName: initial.ownerName.trim().split(/\s+/)[0] ?? "",
+    ownerLastName: initial.ownerName.trim().split(/\s+/).slice(1).join(" "),
+    applicationStatus: initial.status === "IN_REVIEW" ? "UNDER_REVIEW" : initial.status === "NEEDS_INFO" ? "INFO_REQUIRED" : initial.status === "REJECTED" ? "DECLINED" : initial.status,
+    riskStatus: initial.riskStatus === "PENDING" ? "LOW" : initial.riskStatus,
     contactNumber: initial.contactNumber,
     contactEmail: initial.contactEmail,
     requestedMonthlyVolume: initial.requestedMonthlyVolume,
     averageTransaction: initial.averageTransaction,
+    salesUserId: initial.createdByUserId || undefined,
+    assignedReviewerId: initial.assignedReviewerUserId ?? undefined,
   } : emptyForm);
-  const [error, setError] = useState("");
+  const [contactNumberTouched, setContactNumberTouched] = useState(false);
+  const [contactEmailTouched, setContactEmailTouched] = useState(false);
+  const contactNumberError = contactNumberTouched ? getContactNumberError(values.contactNumber, true) : "";
+  const contactEmailError = contactEmailTouched ? getEmailError(values.contactEmail, true) : "";
   const update = (field: keyof FormValues, value: string) => setValues((current) => ({ ...current, [field]: field === "requestedMonthlyVolume" || field === "averageTransaction" ? Number(value) : value }));
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!values.businessName.trim() || !values.legalBusinessName.trim() || !values.ownerName.trim() || !values.contactNumber.trim() || !values.contactEmail.trim() || !values.businessType) {
-      setError("Complete all required business and contact information.");
+    setContactNumberTouched(true);
+    setContactEmailTouched(true);
+    if (getContactNumberError(values.contactNumber, true) || getEmailError(values.contactEmail, true)) return;
+    if (!values.businessName.trim() || !values.legalBusinessName.trim() || !values.ownerFirstName.trim() || !values.ownerLastName.trim() || !values.contactNumber.trim() || !values.contactEmail.trim() || !values.businessType) {
+      notification.error({
+        message: "Incomplete application",
+        description: "Complete all required business and contact information.",
+      });
       return;
     }
-    setError("");
-    onSave(values, (event.nativeEvent as SubmitEvent).submitter?.getAttribute("value") === "submit");
+    if (role === "admin" && (!values.salesUserId || !values.assignedReviewerId)) {
+      notification.error({
+        message: "Assignments required",
+        description: "Select both a Sales owner and an assigned reviewer before submitting.",
+      });
+      return;
+    }
+    onSave(values);
   };
 
   return <div className="mf-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="mf-modal mf-form-modal" role="dialog" aria-modal="true" aria-labelledby="application-form-title">
     <div className="mf-modal-heading"><div><div className="mf-overline">MERCHANT APPLICATION</div><h2 id="application-form-title">{initial ? "Update application" : "Create application"}</h2><p>Enter business details and requested processing information.</p></div><button className="mf-close" type="button" onClick={onCancel} aria-label="Close">×</button></div>
-    <form className="mf-application-form" onSubmit={submit}><div className="mf-form-section-title">Business details</div>
-      <div className="mf-form-grid"><label>Business name *<input value={values.businessName} onChange={(event) => update("businessName", event.target.value)} placeholder="e.g. Juniper Market" required /></label><label>Legal business name *<input value={values.legalBusinessName} onChange={(event) => update("legalBusinessName", event.target.value)} placeholder="Registered legal name" required /></label><label>Business type *<select value={values.businessType} onChange={(event) => update("businessType", event.target.value)} required><option value="">Select business type</option>{businessTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label>Owner / primary contact *<input value={values.ownerName} onChange={(event) => update("ownerName", event.target.value)} placeholder="Full name" required /></label><label>Contact number *<input type="tel" value={values.contactNumber} onChange={(event) => update("contactNumber", event.target.value)} placeholder="+1 (555) 000-0000" required /></label><label>Contact email *<input type="email" value={values.contactEmail} onChange={(event) => update("contactEmail", event.target.value)} placeholder="owner@business.com" required /></label></div>
+    <form className="mf-application-form" onSubmit={submit} noValidate><div className="mf-form-section-title">Business details</div>
+      <div className="mf-form-grid"><label>Business name *<input value={values.businessName} onChange={(event) => update("businessName", event.target.value)} placeholder="e.g. Juniper Market" required /></label><label>Legal business name *<input value={values.legalBusinessName} onChange={(event) => update("legalBusinessName", event.target.value)} placeholder="Registered legal name" required /></label><label>Business type *<select value={values.businessType} onChange={(event) => update("businessType", event.target.value)} required><option value="">Select business type</option>{businessTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label>Owner first name *<input value={values.ownerFirstName} onChange={(event) => update("ownerFirstName", event.target.value)} placeholder="First name" required /></label><label>Owner last name *<input value={values.ownerLastName} onChange={(event) => update("ownerLastName", event.target.value)} placeholder="Last name" required /></label><label className={contactNumberError ? "mf-field-invalid" : ""}>Contact number *<input type="tel" inputMode="numeric" pattern="[0-9]{10}" aria-invalid={Boolean(contactNumberError)} aria-describedby="application-contact-number-error" value={values.contactNumber} onBlur={() => setContactNumberTouched(true)} onChange={(event) => { setContactNumberTouched(true); update("contactNumber", event.target.value); }} placeholder="10-digit number" required /><span id="application-contact-number-error" className="mf-field-error" aria-live="polite">{contactNumberError}</span></label><label className={contactEmailError ? "mf-field-invalid" : ""}>Contact email *<input type="email" aria-invalid={Boolean(contactEmailError)} aria-describedby="application-contact-email-error" value={values.contactEmail} onBlur={() => setContactEmailTouched(true)} onChange={(event) => { setContactEmailTouched(true); update("contactEmail", event.target.value); }} placeholder="owner@business.com" required /><span id="application-contact-email-error" className="mf-field-error" aria-live="polite">{contactEmailError}</span></label>
+        {role === "admin" && <><label>Sales owner *<select required value={values.salesUserId ?? ""} onChange={(event) => setValues((current) => ({ ...current, salesUserId: event.target.value ? Number(event.target.value) : undefined }))}><option value="">Select sales user</option>{initial && values.salesUserId && !salesUsers.some((user) => user.userId === values.salesUserId) && <option value={values.salesUserId}>{initial.createdByName || `User ${values.salesUserId}`}</option>}{salesUsers.map((user) => <option key={user.userId} value={user.userId}>{[user.firstName, user.middleName, user.lastName].filter(Boolean).join(" ")} · {user.email}</option>)}</select></label><label>Assigned reviewer *<select required value={values.assignedReviewerId ?? ""} onChange={(event) => setValues((current) => ({ ...current, assignedReviewerId: event.target.value ? Number(event.target.value) : undefined }))}><option value="">Select reviewer</option>{initial && values.assignedReviewerId && !reviewers.some((reviewer) => reviewer.userId === values.assignedReviewerId) && <option value={values.assignedReviewerId}>{initial.assignedReviewerName || `User ${values.assignedReviewerId}`}</option>}{reviewers.map((reviewer) => <option key={reviewer.userId} value={reviewer.userId}>{reviewer.name}</option>)}</select></label></>}
+      </div>
       <div className="mf-form-section-title mf-form-section-spaced">Requested processing</div><div className="mf-form-grid"><label>Expected monthly volume *<div className="mf-input-prefix"><span>$</span><input type="number" min="0" value={values.requestedMonthlyVolume || ""} onChange={(event) => update("requestedMonthlyVolume", event.target.value)} placeholder="50000" required /></div></label><label>Average transaction *<div className="mf-input-prefix"><span>$</span><input type="number" min="0" value={values.averageTransaction || ""} onChange={(event) => update("averageTransaction", event.target.value)} placeholder="75" required /></div></label></div>
-      {error && <p className="mf-inline-error" role="alert">{error}</p>}<div className="mf-modal-actions"><button className="mf-button mf-button-quiet" type="button" onClick={onCancel}>Cancel</button><button className="mf-button mf-button-outline" type="submit" value="draft" disabled={saving}>Save draft</button><button className="mf-button mf-button-primary" type="submit" value="submit" disabled={saving}>{saving ? "Saving…" : initial ? "Save changes" : "Submit application"}</button></div>
+      <div className="mf-form-section-title mf-form-section-spaced">Application and risk status</div><div className="mf-form-grid"><label>Application status *<select required value={values.applicationStatus} onChange={(event) => setValues((current) => ({ ...current, applicationStatus: event.target.value as FormValues["applicationStatus"] }))}>{applicationStatuses.map((status) => <option key={status} value={status}>{status.replace(/_/g, " ")}</option>)}</select></label><label>Risk status *<select required value={values.riskStatus} onChange={(event) => setValues((current) => ({ ...current, riskStatus: event.target.value as FormValues["riskStatus"] }))}>{riskStatuses.map((status) => <option key={status} value={status}>{status.replace(/_/g, " ")}</option>)}</select></label></div>
+      <div className="mf-modal-actions"><button className="mf-button mf-button-quiet" type="button" onClick={onCancel}>Cancel</button><button className="mf-button mf-button-primary" type="submit" disabled={saving}>{saving ? (initial ? "Saving…" : "Submitting…") : initial ? "Save changes" : "Submit application"}</button></div>
     </form>
   </section></div>;
 }
 
 export default function ApplicationsPage({ profile, role, newApplication = false, reviewQueue = false }: { profile: UserProfile; role: DemoRole; newApplication?: boolean; reviewQueue?: boolean }) {
   const navigate = useNavigate();
-  const [applications, setApplications] = useState(() => listApplications(profile, role));
+  const [applications, setApplications] = useState<MerchantApplication[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [reviewerChoices, setReviewerChoices] = useState<ReturnType<typeof demoWorkspaceUsers>>([]);
+  const [salesChoices, setSalesChoices] = useState<ApiUser[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState("ALL");
-  const [search, setSearch] = useState("");
   const [formOpen, setFormOpen] = useState(newApplication);
   const [editing, setEditing] = useState<MerchantApplication | undefined>();
   const [saving, setSaving] = useState(false);
-  const [assignedReviewer, setAssignedReviewer] = useState("");
-  const [reviewing, setReviewing] = useState(false);
-  const [reviewNote, setReviewNote] = useState("");
-  const [decision, setDecision] = useState<ReviewDecision | null>(null);
-  const [error, setError] = useState("");
+  const [savingRiskDecision, setSavingRiskDecision] = useState(false);
+  const [decision, setDecision] = useState<RiskDecision>("PENDING");
+  useEffect(() => {
+    const token = readAccessToken();
+    let active = true;
+    Promise.resolve()
+      .then(() => {
+        if (!token) throw new Error("Your session has expired. Please sign in again.");
+        return Promise.all([
+          listApplicationsApi(token),
+          role === "admin" ? listAllUsersByRoleApi(token, "reviewer") : Promise.resolve([]),
+          role === "admin" ? listAllUsersByRoleApi(token, "sales") : Promise.resolve([]),
+        ]);
+      })
+      .then(([rows, apiReviewers, apiSalesUsers]) => {
+        if (!active) return;
+        setApplications(rows);
+        setReviewerChoices(apiReviewers.map((user) => ({ userId: user.userId, name: [user.firstName, user.middleName, user.lastName].filter(Boolean).join(" "), contactNumber: user.contactNumber, email: user.email, role: "reviewer" as const, status: "Active" as const })));
+        setSalesChoices(apiSalesUsers);
+      }).catch((loadError: unknown) => {
+        if (active) notification.error({
+          message: "Could not load applications",
+          description: loadError instanceof Error ? loadError.message : "Could not load applications.",
+        });
+      }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [role]);
 
   const selected = applications.find((item) => item.id === selectedId) ?? null;
-  const visibleApplications = useMemo(() => applications.filter((item) => {
-    const matchesStatus = statusFilter === "ALL" || item.status === statusFilter;
-    const query = search.trim().toLowerCase();
-    const matchesSearch = !query || [item.businessName, item.legalBusinessName, item.ownerName, item.id].some((value) => value.toLowerCase().includes(query));
-    return matchesStatus && matchesSearch;
-  }), [applications, search, statusFilter]);
-  const reviewers = demoWorkspaceUsers(profile).filter((user) => user.role === "reviewer" && user.status === "Active");
+  const visibleApplications = applications;
+  const reviewers = reviewerChoices;
 
-  const refresh = () => setApplications(listApplications(profile, role));
-  const handleSave = (values: FormValues, submit: boolean) => {
+  const openApplication = (application: MerchantApplication) => {
+    setDecision(application.riskDecision);
+    setSelectedId(application.id);
+  };
+
+  const refresh = async () => {
+    const token = readAccessToken();
+    if (token) setApplications(await listApplicationsApi(token));
+  };
+  const handleSave = async (values: FormValues) => {
     setSaving(true);
     try {
-      const saved = saveApplication(profile, role, editing?.id ?? null, { ...values, submit });
-      refresh();
+      const token = readAccessToken();
+      if (!token) throw new Error("Your session has expired. Please sign in again.");
+      const payload = {
+        businessName: values.businessName,
+        legalBusinessName: values.legalBusinessName,
+        businessType: values.businessType,
+        ownerFirstName: values.ownerFirstName,
+        ownerLastName: values.ownerLastName,
+        ownerEmail: values.contactEmail,
+        ownerContactNumber: values.contactNumber,
+        requestedMonthlyVolume: values.requestedMonthlyVolume,
+        averageTransactionAmount: values.averageTransaction,
+        applicationStatus: values.applicationStatus,
+        riskStatus: values.riskStatus,
+        ...(role === "admin" && values.salesUserId ? { salesUserId: values.salesUserId } : {}),
+        ...(values.assignedReviewerId ? { assignedReviewerId: values.assignedReviewerId } : {}),
+      };
+      if (editing) {
+        await updateApplicationApi(token, editing.id, payload);
+      } else {
+        await createApplicationApi(token, payload);
+      }
+      await refresh();
       setFormOpen(false);
       setEditing(undefined);
-      setSelectedId(saved.id);
+      notification.success({
+        message: editing ? "Application updated" : "Application submitted",
+        description: `${values.businessName} was ${editing ? "updated" : "submitted"} successfully.`,
+      });
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Could not save the application.");
+      notification.error({
+        message: "Could not save the application",
+        description: saveError instanceof Error ? saveError.message : "Could not save the application.",
+      });
     } finally { setSaving(false); }
   };
 
-  const handleAssign = () => {
-    const reviewer = reviewers.find((item) => item.userId === Number(assignedReviewer));
-    if (!selected || !reviewer) return;
+  const handleDecision = async (decision: Exclude<RiskDecision, "PENDING">) => {
+    if (!selected) return;
+    setSavingRiskDecision(true);
     try {
-      assignReviewer(selected.id, { userId: reviewer.userId, name: reviewer.name }, role);
-      setError("");
-      refresh();
-    } catch (assignError) { setError(assignError instanceof Error ? assignError.message : "Could not assign reviewer."); }
-  };
-
-  const handleDecision = () => {
-    if (!selected || !decision) return;
-    if (decision !== "APPROVE" && !reviewNote.trim()) { setError("Add a decision note before requesting information or rejecting."); return; }
-    try {
-      recordReviewDecision(selected.id, decision, reviewNote, profile, role);
-      setReviewing(false);
-      setDecision(null);
-      setReviewNote("");
-      setError("");
-      refresh();
-    } catch (decisionError) { setError(decisionError instanceof Error ? decisionError.message : "Could not record the decision."); }
+      const token = readAccessToken();
+      if (!token) throw new Error("Your session has expired. Please sign in again.");
+      await recordRiskDecisionApi(token, selected.id, decision);
+      await refresh();
+      notification.success({ message: "Risk decision saved", description: `The risk decision for ${selected.businessName} was saved.` });
+    } catch (decisionError) {
+      notification.error({
+        message: "Could not record the decision",
+        description: decisionError instanceof Error ? decisionError.message : "Could not record the decision.",
+      });
+    } finally {
+      setSavingRiskDecision(false);
+    }
   };
 
   const closeForm = () => { setFormOpen(false); setEditing(undefined); if (newApplication) navigate("/demo/dashboard/applications"); };
@@ -122,20 +203,19 @@ export default function ApplicationsPage({ profile, role, newApplication = false
 
   return <div className="mf-page">
     <div className="mf-page-heading"><div><div className="mf-overline">{reviewQueue ? "RISK & UNDERWRITING" : "MERCHANTS"}</div><h1>{heading}</h1><p>{reviewQueue ? "Review only applications assigned to your account." : role === "sales" ? "Create and track applications you submitted." : "Manage merchant onboarding from submission through decision."}</p></div>{(role === "sales" || role === "admin") && !reviewQueue && <button className="mf-button mf-button-primary" onClick={() => { setEditing(undefined); setFormOpen(true); }}>＋ New application</button>}</div>
-    <section className="mf-panel mf-list-panel"><div className="mf-list-toolbar"><label className="mf-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search merchants, owners, or ID" /></label><label className="mf-filter-label">Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="ALL">All statuses</option>{Object.entries(statusLabel).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><span className="mf-result-count">{visibleApplications.length} {visibleApplications.length === 1 ? "application" : "applications"}</span></div>
-      {visibleApplications.length ? <div className="mf-table-scroll"><table className="mf-table"><thead><tr><th>MERCHANT</th><th>BUSINESS TYPE</th><th>OWNER / CONTACT</th><th>VOLUME / MO.</th><th>RISK</th><th>STATUS</th><th>UPDATED</th><th /></tr></thead><tbody>{visibleApplications.map((item) => <tr key={item.id}><td><button className="mf-merchant-cell" onClick={() => setSelectedId(item.id)}><span className="mf-merchant-avatar">{item.businessName.slice(0, 1).toUpperCase()}</span><span><strong>{item.businessName}</strong><small>{item.id}</small></span></button></td><td>{item.businessType}</td><td><strong>{item.ownerName}</strong><small>{item.contactEmail}</small></td><td>${item.requestedMonthlyVolume.toLocaleString()}</td><td><span className={`mf-risk mf-risk-${item.riskStatus.toLowerCase()}`}>{item.riskStatus}</span></td><td><Status status={item.status} /></td><td>{new Date(item.updatedAt).toLocaleDateString()}</td><td><button className="mf-row-action" onClick={() => setSelectedId(item.id)} aria-label={`Open ${item.businessName}`}>›</button></td></tr>)}</tbody></table></div> : <div className="mf-empty"><span className="mf-empty-icon">⌕</span><strong>No matching applications</strong><span>Adjust your search or filters, or create a new application.</span></div>}
+    <section className="mf-panel mf-list-panel"><div className="mf-list-toolbar"><span className="mf-result-count">{visibleApplications.length} {visibleApplications.length === 1 ? "application" : "applications"}</span></div>
+      {loading ? <div className="mf-empty"><strong>Loading applications…</strong></div> : null}
+      {!loading && (visibleApplications.length ? <div className="mf-table-scroll"><table className="mf-table"><thead><tr><th>MERCHANT</th><th>BUSINESS TYPE</th><th>OWNER / CONTACT</th><th>SALES USER</th><th>REVIEWER</th><th>VOLUME / MO.</th><th>RISK</th><th>RISK DECISION</th><th>STATUS</th><th>UPDATED</th><th /></tr></thead><tbody>{visibleApplications.map((item) => <tr key={item.id}><td><button className="mf-merchant-cell" onClick={() => openApplication(item)}><span className="mf-merchant-avatar">{item.businessName.slice(0, 1).toUpperCase()}</span><span><strong>{item.businessName}</strong><small>{item.id}</small></span></button></td><td>{item.businessType}</td><td><strong>{item.ownerName}</strong><small>{item.contactEmail}</small></td><td>{item.createdByName || "—"}</td><td>{item.assignedReviewerName || "—"}</td><td>${item.requestedMonthlyVolume.toLocaleString()}</td><td><span className={`mf-risk mf-risk-${item.riskStatus.toLowerCase()}`}>{item.riskStatus}</span></td><td><span className={`mf-risk mf-risk-decision-${item.riskDecision.toLowerCase()}`}>{item.riskDecision}</span></td><td><Status status={item.status} /></td><td>{new Date(item.updatedAt).toLocaleDateString()}</td><td><button className="mf-row-action" onClick={() => openApplication(item)} aria-label={`Open ${item.businessName}`}>›</button></td></tr>)}</tbody></table></div> : <div className="mf-empty"><span className="mf-empty-icon">⌕</span><strong>No applications</strong><span>Applications will appear here when they are available.</span></div>)}
     </section>
-    <div className="mf-demo-notice">Preview records are stored in this browser. Production access rules and records must be enforced by the API.</div>
 
-    {formOpen && <ApplicationForm initial={editing} onCancel={closeForm} onSave={handleSave} saving={saving} />}
+    {formOpen && <ApplicationForm initial={editing} role={role} salesUsers={salesChoices} reviewers={reviewers} onCancel={closeForm} onSave={handleSave} saving={saving} />}
 
-    {selected && !reviewing && <div className="mf-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) { setSelectedId(null); setError(""); } }}><section className="mf-modal mf-detail-modal" role="dialog" aria-modal="true" aria-labelledby="application-detail-title"><div className="mf-modal-heading"><div><div className="mf-overline">APPLICATION · {selected.id}</div><h2 id="application-detail-title">{selected.businessName}</h2><p>{selected.legalBusinessName}</p></div><button className="mf-close" onClick={() => { setSelectedId(null); setError(""); }} aria-label="Close">×</button></div>
-      <div className="mf-detail-status"><Status status={selected.status} /><span className={`mf-risk mf-risk-${selected.riskStatus.toLowerCase()}`}>Risk: {selected.riskStatus}</span></div><div className="mf-detail-grid"><div><small>BUSINESS TYPE</small><strong>{selected.businessType}</strong></div><div><small>OWNER / CONTACT</small><strong>{selected.ownerName}</strong></div><div><small>CONTACT NUMBER</small><strong>{selected.contactNumber}</strong></div><div><small>CONTACT EMAIL</small><strong>{selected.contactEmail}</strong></div><div><small>REQUESTED MONTHLY VOLUME</small><strong>${selected.requestedMonthlyVolume.toLocaleString()}</strong></div><div><small>AVERAGE TRANSACTION</small><strong>${selected.averageTransaction.toLocaleString()}</strong></div><div><small>CREATED BY</small><strong>{selected.createdByName}</strong></div><div><small>ASSIGNED REVIEWER</small><strong>{selected.assignedReviewerName ?? "Unassigned"}</strong></div><div><small>CREATED</small><strong>{new Date(selected.createdAt).toLocaleString()}</strong></div><div><small>LAST UPDATED</small><strong>{new Date(selected.updatedAt).toLocaleString()}</strong></div></div>
-      {selected.reviewNote && <div className="mf-review-note"><strong>Review note</strong><p>{selected.reviewNote}</p></div>}{error && <p className="mf-inline-error" role="alert">{error}</p>}
-      {role === "admin" && ["SUBMITTED", "IN_REVIEW", "NEEDS_INFO"].includes(selected.status) && <div className="mf-assign-row"><label>Assign reviewer<select value={assignedReviewer} onChange={(event) => setAssignedReviewer(event.target.value)}><option value="">Choose a reviewer</option>{reviewers.map((reviewer) => <option value={reviewer.userId} key={reviewer.userId}>{reviewer.name} · {roleLabels[reviewer.role]}</option>)}</select></label><button className="mf-button mf-button-outline" onClick={handleAssign} disabled={!assignedReviewer}>Assign</button></div>}
-      <div className="mf-modal-actions"><button className="mf-button mf-button-quiet" onClick={() => setSelectedId(null)}>Close</button>{canEdit(selected) && <button className="mf-button mf-button-outline" onClick={() => { setEditing(selected); setFormOpen(true); setSelectedId(null); }}>Edit application</button>}{role === "reviewer" && selected.assignedReviewerUserId === profile.userId && selected.status === "IN_REVIEW" && <button className="mf-button mf-button-primary" onClick={() => setReviewing(true)}>Make decision</button>}</div>
+    {selected && <div className="mf-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedId(null); }}><section className="mf-modal mf-detail-modal" role="dialog" aria-modal="true" aria-labelledby="application-detail-title"><div className="mf-modal-heading"><div><div className="mf-overline">APPLICATION · {selected.id}</div><h2 id="application-detail-title">{selected.businessName}</h2><p>{selected.legalBusinessName}</p></div><button className="mf-close" onClick={() => setSelectedId(null)} aria-label="Close">×</button></div>
+      <div className="mf-detail-status"><Status status={selected.status} /><span className={`mf-risk mf-risk-${selected.riskStatus.toLowerCase()}`}>Risk: {selected.riskStatus}</span><span className={`mf-risk mf-risk-decision-${selected.riskDecision.toLowerCase()}`}>Decision: {selected.riskDecision}</span></div><div className="mf-detail-grid"><div><small>BUSINESS TYPE</small><strong>{selected.businessType}</strong></div><div><small>OWNER / CONTACT</small><strong>{selected.ownerName}</strong></div><div><small>CONTACT NUMBER</small><strong>{selected.contactNumber}</strong></div><div><small>CONTACT EMAIL</small><strong>{selected.contactEmail}</strong></div><div><small>REQUESTED MONTHLY VOLUME</small><strong>${selected.requestedMonthlyVolume.toLocaleString()}</strong></div><div><small>AVERAGE TRANSACTION</small><strong>${selected.averageTransaction.toLocaleString()}</strong></div><div><small>CREATED BY</small><strong>{selected.createdByName}</strong></div><div><small>ASSIGNED REVIEWER</small><strong>{selected.assignedReviewerName ?? "Unassigned"}</strong></div><div><small>CREATED</small><strong>{new Date(selected.createdAt).toLocaleString()}</strong></div><div><small>LAST UPDATED</small><strong>{new Date(selected.updatedAt).toLocaleString()}</strong></div></div>
+      {selected.reviewNote && <div className="mf-review-note"><strong>Review note</strong><p>{selected.reviewNote}</p></div>}
+      {(role === "admin" || (role === "reviewer" && selected.assignedReviewerUserId === profile.userId)) && <div className="mf-assign-row"><label>Risk Decision<select value={decision} onChange={(event) => setDecision(event.target.value as RiskDecision)} disabled={savingRiskDecision}><option value="PENDING" disabled>Select a decision</option><option value="APPROVE">Accept</option><option value="REJECT">Reject</option></select></label><button className="mf-button mf-button-outline" onClick={() => { if (decision !== "PENDING" && decision !== selected.riskDecision) void handleDecision(decision); }} disabled={savingRiskDecision || decision === "PENDING" || decision === selected.riskDecision}>{savingRiskDecision ? "Updating…" : "Update decision"}</button></div>}
+      <div className="mf-modal-actions"><button className="mf-button mf-button-quiet" onClick={() => setSelectedId(null)}>Close</button>{canEdit(selected) && <button className="mf-button mf-button-outline" onClick={() => { setEditing(selected); setFormOpen(true); setSelectedId(null); }}>Edit application</button>}</div>
     </section></div>}
 
-    {selected && reviewing && <div className="mf-modal-backdrop"><section className="mf-modal mf-decision-modal" role="dialog" aria-modal="true" aria-labelledby="decision-title"><div className="mf-modal-heading"><div><div className="mf-overline">RISK DECISION · {selected.id}</div><h2 id="decision-title">{selected.businessName}</h2><p>Record a decision for this assigned application.</p></div><button className="mf-close" onClick={() => setReviewing(false)} aria-label="Close">×</button></div><label className="mf-field-label">Decision<select value={decision ?? ""} onChange={(event) => setDecision(event.target.value as ReviewDecision)}><option value="">Select a decision</option><option value="APPROVE">Approve application</option><option value="REQUEST_INFO">Request more information</option><option value="REJECT">Reject application</option></select></label><label className="mf-field-label">Decision note<textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} rows={4} placeholder="Summarize the risk rationale and next steps…" /></label>{error && <p className="mf-inline-error" role="alert">{error}</p>}<div className="mf-modal-actions"><button className="mf-button mf-button-quiet" onClick={() => setReviewing(false)}>Cancel</button><button className="mf-button mf-button-primary" onClick={handleDecision} disabled={!decision}>Record decision</button></div></section></div>}
   </div>;
 }

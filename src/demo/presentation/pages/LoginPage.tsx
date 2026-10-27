@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { notification } from "antd/lib";
 import { clearAccessToken, readAccessToken, saveAccessToken } from "../../business/auth";
 import { login } from "../../infrastructure/AuthApi";
 import merchFlowLogo from "../../../assets/images/logo-square.png";
@@ -10,30 +11,45 @@ export default function LoginPage() {
   const location = useLocation();
   const [contactNumber, setContactNumber] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState(() => (location.state as { authError?: string } | null)?.authError ?? "");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (readAccessToken()) navigate("/demo/dashboard", { replace: true });
   }, [navigate]);
 
+  useEffect(() => {
+    const authError = (location.state as { authError?: string } | null)?.authError;
+    if (authError) {
+      notification.error({ message: "Sign-in failed", description: authError });
+      navigate(location.pathname, { replace: true, state: null });
+    }
+  }, [location.pathname, location.state, navigate]);
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (loading) return;
     if (!contactNumber.trim() || !password) {
-      setError("Enter your contact number and password to continue.");
+      notification.error({
+        message: "Sign-in details required",
+        description: "Enter your contact number and password to continue.",
+      });
       return;
     }
 
     setLoading(true);
-    setError("");
     clearAccessToken();
     try {
       const auth = await login(contactNumber.trim(), password);
       saveAccessToken(auth.accessToken);
       navigate("/demo/dashboard", { replace: true });
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to sign in. Please try again.");
+      notification.error({
+        message: "Unable to sign in",
+        description:
+          requestError instanceof Error
+            ? requestError.message
+            : "Please try again.",
+      });
     } finally {
       setLoading(false);
     }
@@ -54,7 +70,6 @@ export default function LoginPage() {
           <div className="demo-label-row"><label htmlFor="password">Password</label><a href="#help" onClick={(event) => event.preventDefault()}>Forgot password?</a></div>
           <input id="password" type="password" autoComplete="current-password" placeholder="Enter your password" value={password} onChange={(event) => setPassword(event.target.value)} />
 
-          {error && <p className="demo-form-error" role="alert">{error}</p>}
           <button className="demo-primary-button" type="submit" disabled={loading}>{loading ? "Signing in…" : "Sign in"} <span aria-hidden="true">→</span></button>
         </form>
         <p className="demo-login-footnote">Secure sign-in for your MerchFlow account</p>
